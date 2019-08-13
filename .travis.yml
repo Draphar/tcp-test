@@ -1,0 +1,39 @@
+language: rust
+
+dist: trusty
+
+matrix:
+  include:
+    - os: linux
+      env:
+        - target: x86_64-unknown-linux-gnu
+    - os: linux
+      env:
+        - target: i686-unknown-linux-gnu
+      addons:
+        apt:
+          packages:
+            - gcc-multilib
+    - os: osx
+      env:
+        - target: x86_64-apple-darwin
+    - os: osx
+      env:
+        - target: i686-apple-darwin
+
+install:
+  - rustup component add rustfmt
+  - rustup component add clippy
+  - rustup toolchain install "stable-$target"
+  - rustup toolchain install "beta-$target"
+  - rustup toolchain install "nightly-$target"
+
+script:
+  - cargo fmt -- --check
+  - cargo clippy
+  - rustup run "stable-$target" cargo test
+  - rustup run "stable-$target" cargo test --release
+  - rustup run "beta-$target" cargo test
+  - rustup run "beta-$target" cargo test --release
+  - rustup run "nightly-$target" cargo test
+  - rustup run "nightly-$target" cargo test --release

@@ -1,0 +1,21 @@
+[package]
+name = "tcp-test"
+version = "0.0.1"
+authors = ["Draphar <draphar-code@protonmail.com>"]
+edition = "2018"
+repository = "https://github.com/Draphar/tcp-test/"
+license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/tcp-test/"
+description = "Test your TCP code"
+categories = ["development-tools::testing"]
+keywords = ["tcp", "test"]
+
+[badges]
+travis-ci = { repository = "Draphar/tcp-test" }
+
+[dependencies]
+lazy_static = "0.1"
+
+[features]
+only_panic = []
