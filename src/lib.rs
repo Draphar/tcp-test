@@ -46,175 +46,66 @@ fn third_test() {
 }
 ```
 
-# Features
-
-By default, a panic in one of the internal threads causes all tests to exit,
-because in most cases the tests will just block indefinitely.
-The `only_panic` feature prevents this behaviour if enabled.
-
 [`channel()`]: fn.channel.html
 */
 
-#![deny(unsafe_code)]
+//todo: Don't use ToSocketAddrs, create a new trait instead
 
 extern crate lazy_static;
 
 use lazy_static::lazy_static;
 
-use std::io::{self, Error, ErrorKind};
-use std::mem;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, ToSocketAddrs};
-use std::process;
-use std::sync::{Arc, Condvar, Mutex, Once};
+use std::net::*;
+use std::sync::{mpsc, Arc, Mutex, Once};
 use std::thread::Builder;
 
-static SPAWN_SERVER: Once = Once::new();
-
 lazy_static! {
-    static ref STREAM: Arc<(Mutex<Option<(TcpStream, TcpStream)>>, Condvar)> =
-        Arc::new((Mutex::new(None), Condvar::new()));
-
     /// `127.0.0.1:31398`
     static ref DEFAULT_ADDRESS: SocketAddr =
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31398));
 }
 
-/// Listen to traffic on a specific address.
-///
-/// The parsed input address is returned for simplicity reasons.
-///
-/// # Important:
-///
-/// The address must be equal in all calls to this function,
-/// otherwise only one of the addresses is used!
-///
-/// If there already is a server listening on *any* address,
-/// only the address is returned even though it might not be the address of the listening server.
-/// The same holds for `listen()`.
-fn listen_on(address: impl ToSocketAddrs) {
-    SPAWN_SERVER.call_once(move || {
-        let address = address
-            .to_socket_addrs()
-            .expect("<impl ToSocketAddrs>::to_socket_addrs() at listen_on()")
-            .next()
-            .expect("ToSocketAddrs::Iter::next() at listen_on()");
+static mut CHANNEL: Option<Arc<Mutex<(mpsc::Sender<()>, mpsc::Receiver<(TcpStream, TcpStream)>)>>> =
+    None;
+static INIT: Once = Once::new();
 
-        let listener = TcpListener::bind(address).expect("TcpListener::bind() at listen_on()");
-        let buf = Arc::new((Mutex::new(None), Condvar::new()));
-        let buf2 = buf.clone();
+fn init(address: impl ToSocketAddrs) {
+    INIT.call_once(move || {
+        let address = resolve(address);
 
-        Builder::new()
-            .name(String::from("tcp-test listener thread"))
-            .spawn(move || {
-                let (ref lock, ref cvar) = &*buf2;
+        // channel for blocking
+        let (ex_send, receiver) = mpsc::channel();
 
-                listener_thread(listener, lock, cvar).map_err(|e| {
-                    if cfg!(feature = "only_panic") {
-                        panic!("tcp-test internal error: {}", e);
-                    } else if cfg!(not(feature = "only_panic")) {
-                        eprintln!(
-                            "tcp-test internal error: {error}, {file}:{line}:{column}",
-                            error = e,
-                            file = file!(),
-                            line = line!(),
-                            column = column!()
-                        );
-                        process::exit(1);
-                    };
-                })
-            })
-            .expect("Builder::spawn() at listen_on()");
+        // channel for sending the streams
+        let (sender, ex_recv) = mpsc::channel();
 
-        Builder::new()
-            .name(String::from("tcp-test channel thread"))
-            .spawn(move || {
-                let &(ref lock, ref cvar) = &*buf;
-
-                channel_thread(address, lock, cvar).map_err(|e| {
-                    if cfg!(feature = "only_panic") {
-                        panic!("tcp-test internal error: {}", e);
-                    } else if cfg!(not(feature = "only_panic")) {
-                        eprintln!(
-                            "tcp-test internal error: {error}, {file}:{line}:{column}",
-                            error = e,
-                            file = file!(),
-                            line = line!(),
-                            column = column!()
-                        );
-                        process::exit(1);
-                    };
-                })
-            })
-            .expect("Builder::spawn() at listen_on()");
-    });
-}
-
-fn listener_thread(
-    listener: TcpListener,
-    lock: &Mutex<Option<TcpStream>>,
-    cvar: &Condvar,
-) -> io::Result<()> {
-    let error = |message| Error::new(ErrorKind::Other, message);
-
-    for i in listener.incoming() {
-        let i = i?;
-
-        let mut buf = lock
-            .lock()
-            .map_err(|_| error(concat!("failed to lock Mutex, ", line!())))?;
-
-        while buf.is_some() {
-            buf = cvar
-                .wait(buf)
-                .map_err(|_| error(concat!("failed to wait for Condvar, ", line!())))?;
-        }
-
-        *buf = Some(i);
-        cvar.notify_one();
-    }
-
-    Ok(())
-}
-
-fn channel_thread(
-    address: SocketAddr,
-    lock: &Mutex<Option<TcpStream>>,
-    cvar: &Condvar,
-) -> Result<(), Error> {
-    let error = |message| Error::new(ErrorKind::Other, message);
-
-    loop {
-        let local = TcpStream::connect(address)?;
-
-        let remote = {
-            // get the stream from the listener thread
-            let mut remote = lock
-                .lock()
-                .map_err(|_| error(concat!("failed to lock Mutex, ", line!())))?;
-            while remote.is_none() {
-                remote = cvar
-                    .wait(remote)
-                    .map_err(|_| error(concat!("failed to wait for Condvar, ", line!())))?;
-            }
-
-            mem::replace(&mut *remote, None).unwrap()
+        unsafe {
+            CHANNEL = Some(Arc::new(Mutex::new((ex_send, ex_recv))));
         };
 
-        // change the global variable
-        let &(ref lock, ref cvar) = &*STREAM.clone();
-        let mut stream = lock
-            .lock()
-            .map_err(|_| error(concat!("failed to lock Mutex, ", line!())))?;
-        while stream.is_some() {
-            stream = cvar
-                .wait(stream)
-                .map_err(|_| error(concat!("failed to wait for Condvar, ", line!())))?;
-        }
+        let listener = TcpListener::bind(address)
+            .expect(concat!("TcpListener::bind() at init(), line ", line!()));
 
-        *stream = Some((local, remote));
+        Builder::new()
+            .name(String::from("tcp-test background thread"))
+            .spawn(move || loop {
+                receiver
+                    .recv()
+                    .expect(concat!("Receiver::recv() at init(), line ", line!()));
 
-        cvar.notify_one();
-    }
+                let local = TcpStream::connect(address)
+                    .expect(concat!("TcpStream::connect() at init(), line ", line!()));
+                let remote = listener
+                    .accept()
+                    .expect(concat!("TcpListener::accept() at init(), line ", line!()))
+                    .0;
+
+                sender
+                    .send((local, remote))
+                    .expect(concat!("Sender::send() at init(), line ", line!()));
+            })
+            .expect(concat!("Builder::spawn() at init(), line ", line!()));
+    });
 }
 
 /// Returns two TCP streams pointing at each other.
@@ -224,23 +115,27 @@ fn channel_thread(
 /// # Example
 ///
 /// ```
-/// # use tcp_test::channel;
+/// use tcp_test::channel;
 /// use std::io::{Read, Write};
 ///
-/// let data = b"Hello world!";
-/// let (mut local, mut remote) = channel();
+/// #[test]
+/// fn test() {
+///     let data = b"Hello world!";
+///     let (mut local, mut remote) = channel();
 ///
-/// let local_addr = local.local_addr().unwrap();
-/// let peer_addr = remote.peer_addr().unwrap();
+///     let local_addr = local.local_addr().unwrap();
+///     let peer_addr = remote.peer_addr().unwrap();
 ///
-/// assert_eq!(local_addr, peer_addr);
+///     assert_eq!(local_addr, peer_addr);
+///     assert_eq!(local.peer_addr().unwrap(), "127.0.0.1:31398".parse().unwrap()); // default address
 ///
-/// local.write_all(data).unwrap();
+///     local.write_all(data).unwrap();
 ///
-/// let mut buf = [0; 12];
-/// remote.read_exact(&mut buf).unwrap();
+///     let mut buf = [0; 12];
+///     remote.read_exact(&mut buf).unwrap();
 ///
-/// assert_eq!(&buf, data);
+///     assert_eq!(&buf, data);
+/// }
 /// ```
 ///
 /// Also see the [module level example](index.html#example).
@@ -261,46 +156,89 @@ pub fn channel() -> (TcpStream, TcpStream) {
 /// # Example
 ///
 /// ```
-/// # use tcp_test::channel_on;
+/// use tcp_test::channel_on;
 /// use std::io::{Read, Write};
 ///
-/// let data = b"Hello world!";
-/// let (mut local, mut remote) = channel_on("127.0.0.1:31398");
+/// #[test]
+/// fn test() {
+///     let data = b"Hello world!";
+///     let (mut local, mut remote) = channel_on("127.0.0.1:31399");
 ///
-/// let local_addr = remote.local_addr().unwrap();
-/// let peer_addr = local.peer_addr().unwrap();
+///     assert_eq!(local.peer_addr().unwrap(), "127.0.0.1:31399".parse().unwrap());
+///     assert_eq!(remote.local_addr().unwrap(), "127.0.0.1:31399".parse().unwrap());
 ///
-/// assert_eq!(local_addr, peer_addr);
+///     local.write_all(data).unwrap();
 ///
-/// local.write_all(data).unwrap();
+///     let mut buf = [0; 12];
+///     remote.read_exact(&mut buf).unwrap();
 ///
-/// let mut buf = [0; 12];
-/// remote.read_exact(&mut buf).unwrap();
-///
-/// assert_eq!(&buf, data);
+///     assert_eq!(&buf, data);
+/// }
 /// ```
 ///
 /// [`listen_on()`]: fn.listen_on.html
+#[inline]
 pub fn channel_on(address: impl ToSocketAddrs) -> (TcpStream, TcpStream) {
-    listen_on(address);
+    init(address);
 
-    let &(ref lock, ref cvar) = &*STREAM.clone();
-    let mut buf = lock.lock().unwrap();
-    while buf.is_none() {
-        buf = cvar.wait(buf).unwrap();
-    }
+    let lock = unsafe { CHANNEL.clone().unwrap() };
 
-    let channel = mem::replace(&mut *buf, None);
+    let guard = lock
+        .lock()
+        .expect(concat!("Mutex::lock() at channel_on(), line ", line!()));
 
-    cvar.notify_all();
+    guard
+        .0
+        .send(())
+        .expect(concat!("Sender::send() at channel_on(), line ", line!()));
 
-    channel.unwrap()
+    guard
+        .1
+        .recv()
+        .expect(concat!("Receiver::recv() at channel_on(), line ", line!()))
+}
+
+/// Get the first socket address.
+#[inline]
+fn resolve(address: impl ToSocketAddrs) -> SocketAddr {
+    address
+        .to_socket_addrs()
+        .expect(concat!(
+            "<impl ToSocketAddrs>::to_socket_addrs() at resolve(), line ",
+            line!()
+        ))
+        .next()
+        .expect(concat!(
+            "ToSocketAddrs::Iter::next() at resolve(), line ",
+            line!()
+        ))
 }
 
 /// Convenience macro for reading and comparing a specific amount of bytes.
 ///
 /// Reads a `$n` number of bytes from `$resource` and then compares that buffer with `$expected`.
 /// Panics if the buffers are not equal.
+///
+/// # Example
+///
+/// ```
+/// use tcp_test::read_assert;
+/// use std::io::{self, Read};
+///
+/// struct Placeholder;
+///
+/// impl Read for Placeholder {
+///     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+///         buf[0] = 1;
+///         buf[1] = 2;
+///         buf[2] = 3;
+///
+///         Ok(3)
+///     }
+/// }
+///
+/// read_assert!(Placeholder {}, 3, [1, 2, 3]);
+/// ```
 #[macro_export]
 macro_rules! read_assert {
     ($resource:expr, $n:expr, $expected:expr) => {{
@@ -319,13 +257,31 @@ macro_rules! read_assert {
                     "read_assert! buffers are not equal"
                 );
             }
-        }
+        };
     }};
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_ok() {
+        assert_eq!(resolve("127.0.0.1:80"), "127.0.0.1:80".parse().unwrap());
+        assert_eq!(resolve("[::1]:80"), "[::1]:80".parse().unwrap());
+
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80));
+        let addrs = [addr; 3];
+        assert_eq!(resolve(addrs.as_ref()), addr);
+    }
+
+    #[test]
+    #[should_panic]
+    fn resolve_err() {
+        let addrs: [SocketAddr; 0] = [];
+        resolve(addrs.as_ref());
+    }
+
     use std::io::{self, Read};
 
     struct Placeholder;
@@ -345,5 +301,40 @@ mod tests {
     #[should_panic]
     fn read_assert_panic() {
         read_assert!(Placeholder {}, 1, [0xff]);
+    }
+
+    macro_rules! test {
+        () => {
+            let (local, remote) = channel();
+
+            let local_addr = remote.local_addr().unwrap();
+            let peer_addr = local.peer_addr().unwrap();
+            assert_eq!(local_addr, peer_addr);
+        };
+    }
+
+    #[test]
+    fn channel_0() {
+        test!();
+    }
+
+    #[test]
+    fn channel_1() {
+        test!();
+    }
+
+    #[test]
+    fn channel_2() {
+        test!();
+    }
+
+    #[test]
+    fn channel_3() {
+        test!();
+    }
+
+    #[test]
+    fn channel_4() {
+        test!();
     }
 }

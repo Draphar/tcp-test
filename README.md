@@ -13,8 +13,6 @@
 
 `tcp-test` is a Rust testing library to programmatically use real TCP in your tests.
 
-Warning: Windows is currently not supported because of `WSACancelBlockingCall` exceptions.
-
 ## Usage
 
 `Cargo.toml`
@@ -33,13 +31,13 @@ use std::io::{self, Read, Write};
 #[test]
 fn some_test() {
     let (mut local, mut remote) = channel();
-    
+
     let data = b"Hello, dear listener!";
     local.write_all(data).unwrap();
-    
+
     let mut buf = Vec::new();
     remote.read_to_end(&mut buf).unwrap();
-    
+
     assert_eq!(&buf, data);
 }
 

@@ -18,4 +18,3 @@ travis-ci = { repository = "Draphar/tcp-test" }
 lazy_static = "1.4"
 
 [features]
-only_panic = []
