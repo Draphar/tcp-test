@@ -15,7 +15,7 @@ keywords = ["tcp", "test"]
 travis-ci = { repository = "Draphar/tcp-test" }
 
 [dependencies]
-lazy_static = "0.1"
+lazy_static = "1.4"
 
 [features]
 only_panic = []
