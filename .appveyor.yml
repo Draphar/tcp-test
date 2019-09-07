@@ -1,0 +1,27 @@
+os: Visual Studio 2015
+
+environment:
+  matrix:
+    - target: x86_64-pc-windows-msvc
+    - target: i686-pc-windows-msvc
+    - target: x86_64-pc-windows-gnu
+    - target: i686-pc-windows-gnu
+
+install:
+  - appveyor DownloadFile https://win.rustup.rs/ -FileName rustup-init.exe
+  - rustup-init -y --default-host %target% --default-toolchain stable
+  - set PATH=%PATH%;%USERPROFILE%\.cargo\bin
+  - rustup component add rustfmt
+  - rustup component add clippy
+  - rustup toolchain install "beta-%target%"
+  - rustup toolchain install "nightly-%target%"
+
+build: false
+
+test_script:
+  - rustup run "stable-%target%" cargo test
+  - rustup run "stable-%target%" cargo test --release
+  - rustup run "beta-%target%" cargo test
+  - rustup run "beta-%target%" cargo test --release
+  - rustup run "nightly-%target%" cargo test
+  - rustup run "nightly-%target%" cargo test --release
